@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "WebSearch",
+      "Bash(pip install:*)",
+      "Bash(npm create:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

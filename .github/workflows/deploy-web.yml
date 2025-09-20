@@ -1,0 +1,222 @@
+name: Deploy Web Client
+
+on:
+  push:
+    branches: [main]
+    paths: ['pkg/aws/web/**', 'pkg/aws/SAM/**']
+  pull_request:
+    branches: [main]
+    paths: ['pkg/aws/web/**', 'pkg/aws/SAM/**']
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      build-artifact: ${{ steps.upload.outputs.artifact-id }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: pkg/aws/web/package-lock.json
+
+    - name: Install dependencies
+      working-directory: pkg/aws/web
+      run: npm ci
+
+    - name: Run tests
+      working-directory: pkg/aws/web
+      run: npm test -- --coverage --watchAll=false
+
+    - name: Build application
+      working-directory: pkg/aws/web
+      run: npm run build
+
+    - name: Upload build artifacts
+      id: upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: web-build-${{ github.sha }}
+        path: pkg/aws/web/dist/
+        retention-days: 7
+
+  deploy-dev:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: development
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup AWS SAM CLI
+      uses: aws-actions/setup-sam@v2
+      with:
+        use-installer: true
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: web-build-${{ github.sha }}
+        path: pkg/aws/web/dist/
+
+    - name: SAM build
+      working-directory: pkg/aws/SAM
+      run: sam build
+
+    - name: SAM deploy to dev
+      working-directory: pkg/aws/SAM
+      run: sam deploy --config-env default --no-confirm-changeset --no-fail-on-empty-changeset
+
+    - name: Upload web assets to S3
+      working-directory: pkg/aws/SAM
+      run: |
+        BUCKET_NAME=$(aws cloudformation describe-stacks \
+          --stack-name autospotter-web \
+          --query 'Stacks[0].Outputs[?OutputKey==`WebClientBucketName`].OutputValue' \
+          --output text)
+        aws s3 sync ../web/dist/ s3://$BUCKET_NAME/ --delete
+
+    - name: Invalidate CloudFront cache
+      working-directory: pkg/aws/SAM
+      run: |
+        DISTRIBUTION_ID=$(aws cloudformation describe-stacks \
+          --stack-name autospotter-web \
+          --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
+          --output text)
+        aws cloudfront create-invalidation --distribution-id $DISTRIBUTION_ID --paths "/*"
+
+  deploy-staging:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup AWS SAM CLI
+      uses: aws-actions/setup-sam@v2
+      with:
+        use-installer: true
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_STAGING }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_STAGING }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: web-build-${{ github.sha }}
+        path: pkg/aws/web/dist/
+
+    - name: SAM build
+      working-directory: pkg/aws/SAM
+      run: sam build
+
+    - name: SAM deploy to staging
+      working-directory: pkg/aws/SAM
+      run: sam deploy --config-env staging --no-confirm-changeset --no-fail-on-empty-changeset
+
+    - name: Upload web assets to S3
+      working-directory: pkg/aws/SAM
+      run: |
+        BUCKET_NAME=$(aws cloudformation describe-stacks \
+          --stack-name autospotter-web-staging \
+          --query 'Stacks[0].Outputs[?OutputKey==`WebClientBucketName`].OutputValue' \
+          --output text)
+        aws s3 sync ../web/dist/ s3://$BUCKET_NAME/ --delete
+
+    - name: Invalidate CloudFront cache
+      working-directory: pkg/aws/SAM
+      run: |
+        DISTRIBUTION_ID=$(aws cloudformation describe-stacks \
+          --stack-name autospotter-web-staging \
+          --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
+          --output text)
+        aws cloudfront create-invalidation --distribution-id $DISTRIBUTION_ID --paths "/*"
+
+  deploy-prod:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup AWS SAM CLI
+      uses: aws-actions/setup-sam@v2
+      with:
+        use-installer: true
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: web-build-${{ github.sha }}
+        path: pkg/aws/web/dist/
+
+    - name: SAM build
+      working-directory: pkg/aws/SAM
+      run: sam build
+
+    - name: SAM deploy to prod
+      working-directory: pkg/aws/SAM
+      run: sam deploy --config-env prod --no-confirm-changeset --no-fail-on-empty-changeset
+
+    - name: Upload web assets to S3
+      working-directory: pkg/aws/SAM
+      run: |
+        BUCKET_NAME=$(aws cloudformation describe-stacks \
+          --stack-name autospotter-web-prod \
+          --query 'Stacks[0].Outputs[?OutputKey==`WebClientBucketName`].OutputValue' \
+          --output text)
+        aws s3 sync ../web/dist/ s3://$BUCKET_NAME/ --delete
+
+    - name: Invalidate CloudFront cache
+      working-directory: pkg/aws/SAM
+      run: |
+        DISTRIBUTION_ID=$(aws cloudformation describe-stacks \
+          --stack-name autospotter-web-prod \
+          --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
+          --output text)
+        aws cloudfront create-invalidation --distribution-id $DISTRIBUTION_ID --paths "/*"
